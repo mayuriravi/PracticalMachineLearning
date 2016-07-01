@@ -1,0 +1,212 @@
+---
+output: word_document
+---
+title: "Quantified Self Movement Prediction Assignment"
+author: "Raviraj Chittaranjan
+date: "July 1, 2016"
+output: word_document
+
+#Background
+
+Using devices such as JawboneUp, NikeFuelBand, and Fitbitit is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.
+
+In this assignment, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants and develop a machine learning algorithm. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+#Data and R packages
+
+##Load packages, set caching
+```{r, echo=FALSE}
+require(caret)
+require(corrplot)
+require(Rtsne)
+#require(randomForest)
+require(stats)
+require(knitr)
+require(ggplot2)
+```
+
+#Getting Data
+
+Set the variables for the URL of training and testing data
+```{r}
+train.link <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test.link <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+```
+
+Set the variables for the file names
+```{r}
+train.fname <- "pml-training.csv"
+test.fname <- "pml-testing.csv"
+
+# if files does not exist, download the files
+
+if (!file.exists(train.fname)) {
+  download.file(train.link, destfile=train.fname, method="curl")
+}
+if (!file.exists(test.fname)) {
+  download.file(test.link, destfile=test.fname, method="curl")
+}
+# load the CSV files as data.frame 
+train.data = read.csv("pml-training.csv")
+test.data = read.csv("pml-testing.csv")
+names(train.data)
+```
+
+#Data Preparation
+
+The assignment needs us to use data from accelerometers on the belt, forearm, arm, and dumbell, so the features are extracted based on these keywords along with the classe feature.
+
+```{r, echo=FALSE}
+# filter columns on: belt, forearm, arm, dumbell
+filter <- grepl("belt|arm|dumbell", names(train.data))
+train <- train.data[, filter]
+test <- test.data[, filter]
+
+#summary(train)
+#summary(test)
+
+#Far more columns contain NA values, decided to remove all columns with NA values.
+
+outcome.tmp <- train.data[, "classe"]
+outcome <- outcome.tmp
+
+levels(outcome)
+num.class <- length(levels(outcome))
+levels(outcome) <- 1:num.class
+head(outcome)
+
+train$classe <- NULL
+
+cols.na <- colSums(is.na(test)) == 0
+train <- train[, cols.na]
+test <- test[, cols.na]
+```
+
+
+#Plot the relationship between features and outcome.
+
+```{r}
+
+featurePlot(train, outcome.tmp, "strip")
+```
+
+From the above plot, we can see that each feature has relatively the same distribution among the 5 outcome levels (A, B, C, D, E).
+
+##Check for features's variance
+
+Based on the principal component analysis(PCA), it is necessary that features have maximum variance for maximum uniqueness, so that each feature is as distant as possible from other features.
+
+```{r}
+# check for zero variance
+zvar = nearZeroVar(train, saveMetrics=TRUE)
+zvar
+```
+
+It appears that there are no features without variability (all has enough variance). So there is no feature to be removed further.
+
+#Let's plot a correlation matrix between features.
+
+```{r}
+corrplot.mixed(cor(train), lower="circle", upper="color", 
+               tl.pos="lt", diag="n", order="hclust", hclust.method="complete")
+```
+
+A good set of features are visibile when they are highly uncorrelated with each other. The plot above shows average correlation which is not too high, so no further PCA preprocessing is needed.
+
+
+#Modeling
+
+##Ran into trouble using Random Forest as my laptop couldn't complete the train function. Switched to XGBOOST instead. It just ran fine in few minutes
+
+
+```{r}
+
+require(xgboost)
+train.matrix = as.matrix(train)
+mode(train.matrix) = "numeric"
+test.matrix = as.matrix(test)
+mode(test.matrix) = "numeric"
+# convert outcome from factor to numeric matrix 
+#   xgboost takes multi-labels in [0, numOfClass)
+y = as.matrix(as.integer(outcome)-1)
+
+param <- list("objective" = "multi:softprob",    # multiclass classification 
+              "num_class" = num.class,    # number of classes 
+              "eval_metric" = "merror",    # evaluation metric 
+              "nthread" = 8,   # number of threads to be used 
+              "max_depth" = 16,    # maximum depth of tree 
+              "eta" = 0.3,    # step size shrinkage 
+              "gamma" = 0,    # minimum loss reduction 
+              "subsample" = 1,    # part of data instances to grow tree 
+              "colsample_bytree" = 1,  # subsample ratio of columns when constructing each tree 
+              "min_child_weight" = 12  # minimum sum of instance weight needed in a child 
+              )
+set.seed(1234)
+
+system.time( bst.cv <- xgb.cv(param=param, data=train.matrix, label=y, 
+              nfold=4, nrounds=200, prediction=TRUE, verbose=FALSE) )
+
+pred.cv = matrix(bst.cv$pred, nrow=length(bst.cv$pred)/num.class, ncol=num.class)
+pred.cv = max.col(pred.cv, "last")
+```
+
+
+```{r}
+min.merror.idx = which.min(bst.cv$dt[, test.merror.mean]) 
+min.merror.idx 
+# minimum merror
+bst.cv$dt[min.merror.idx,]
+
+```
+
+##Model training
+
+Fit the XGBoost gradient boosting model on all of the training data.
+
+```{r}
+system.time( bst <- xgboost(param=param, data=train.matrix, label=y, 
+                           nrounds=min.merror.idx, verbose=0) )
+```
+
+## Predict test data using the trained model
+
+```{r}
+pred <- predict(bst, test.matrix)  
+head(pred, 10)  
+```
+
+## Decoding prediction
+```{r}
+pred = matrix(pred, nrow=num.class, ncol=length(pred)/num.class)
+pred = t(pred)
+pred = max.col(pred, "last")
+pred.char = toupper(letters[pred])
+```
+
+## confusion matrix
+```{r}
+confusionMatrix(factor(y+1), factor(pred.cv))
+```
+
+You can see the confusion matrix shows concentration of correct predictions as expected. Hence the average accuracy is 99.44%.
+
+
+##Estimation of the out-of-sample error rate
+
+The testing subset data gives an unbiased estimate of the xgboost algorithm's prediction Accuracy (99.44% as calculated above). The out-of-sample error rate is derived by the formula 100% - Accuracy = 0.66%.
+
+Hence the out-of-sample error rate is 0.66%.
+
+#Creating submission files
+
+path <-""
+pml_write_files <- function(x) {
+    n <- length(x)
+    for(i in 1: n) {
+        filename <- paste0("problem_id_", i, ".txt")
+        write.table(x[i], file=file.path(path, filename), 
+                    quote=FALSE, row.names=FALSE, col.names=FALSE)
+    }
+}
+pml_write_files(pred.char)
+
